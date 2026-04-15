@@ -215,10 +215,15 @@
         const PHYSICS = {
             MAX_SPEED: 80,           // 最大速度 (KM/H)
             ACCELERATION: 30,        // 加速度
-            BRAKING: 60,             // 刹车力度（加大刹车力度）
+            BRAKING: 45,             // 刹车力度
+            REVERSE_ACCEL: 15,       // 倒车加速度
             FRICTION: 8,             // 地面摩擦力
             OFF_TRACK_FRICTION: 40,  // 赛道外摩擦力
-            TURN_SPEED: 2.5,         // 转向速度
+            TURN_SPEED: 1.8,         // 最大转向角度
+            TURN_RESPONSE: 3.5,      // 转向响应速度
+            TURN_RETURN: 2.5,        // 回正速度
+            STEERING_INERTIA: 0.85,  // 转向惯性系数
+            MIN_SPEED_FOR_TURN: 3,   // 开始转向的最小速度
             DRIFT_FACTOR: 0.3,       // 漂移系数
             CAMERA_DISTANCE: 12,     // 摄像机距离
             CAMERA_HEIGHT: 5,        // 摄像机高度
@@ -613,10 +618,6 @@
             
             // 键盘按下
             window.addEventListener('keydown', (e) => {
-                // 防止重复触发
-                if (keysPressed[e.key]) return;
-                keysPressed[e.key] = true;
-                
                 // 防止方向键和WASD滚动页面
                 if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
                     e.preventDefault();
@@ -627,7 +628,7 @@
                     document.getElementById('game-title').classList.add('hidden');
                 }
                 
-                // 同时处理多个按键
+                // 先更新按键状态 - 确保多键同时按下时正确
                 const key = e.key.toLowerCase();
                 if (key === 'w' || e.key === 'ArrowUp') {
                     controls.forward = true;
@@ -641,6 +642,10 @@
                 if (key === 'd' || e.key === 'ArrowRight') {
                     controls.right = true;
                 }
+                
+                // 防止重复触发（放在最后，不影响状态更新）
+                if (keysPressed[e.key]) return;
+                keysPressed[e.key] = true;
             }, false);
             
             // 键盘释放
@@ -696,8 +701,27 @@
             if (controls.left) targetSteering = PHYSICS.TURN_SPEED;
             if (controls.right) targetSteering = -PHYSICS.TURN_SPEED;
             
-            // 平滑转向
-            carPhysics.steering += (targetSteering - carPhysics.steering) * 5 * deltaTime;
+            // 根据车速动态调整转向灵敏度 - 低速就能转向，高速稳定
+            const absSpeed = Math.abs(carPhysics.speed);
+            // 只要车动就能转向，从0开始逐步建立
+            let speedFactor = Math.min(1, (absSpeed + 2) / 10);
+            // 高速时降低转向灵敏度
+            speedFactor *= Math.max(0.5, 1 - absSpeed / PHYSICS.MAX_SPEED * 0.4);
+            
+            // 倒车时转向反向
+            if (carPhysics.speed < -0.5) {
+                targetSteering *= -1;
+            }
+            
+            // 带惯性的平滑转向 - 模拟方向盘阻尼感
+            let turnSpeed = PHYSICS.TURN_RESPONSE;
+            if (targetSteering === 0) {
+                turnSpeed = PHYSICS.TURN_RETURN;
+            }
+            
+            // 应用转向惯性和阻尼 - 更流畅的过渡
+            const steeringDiff = targetSteering * speedFactor - carPhysics.steering;
+            carPhysics.steering += steeringDiff * turnSpeed * deltaTime;
             
             // 前轮视觉转向
             wheels.forEach(wheel => {
@@ -706,20 +730,22 @@
                 }
             });
             
-            // ----- 速度控制（S键改为刹车，不是倒车）-----
+            // ----- 速度控制：前进 + 刹车/倒车 -----
             if (controls.forward) {
-                // 加速
+                // 前进加速
                 carPhysics.speed += PHYSICS.ACCELERATION * deltaTime;
-            } else if (controls.backward) {
-                // 刹车：无论前进还是后退，都向0减速
-                if (carPhysics.speed > 0) {
-                    // 正在前进，刹车减速
+            }
+            
+            if (controls.backward) {
+                if (carPhysics.speed > 1) {
+                    // 正在前进 - 强力刹车
                     carPhysics.speed -= PHYSICS.BRAKING * deltaTime;
-                    if (carPhysics.speed < 0) carPhysics.speed = 0;
-                } else if (carPhysics.speed < 0) {
-                    // 正在后退，刹车减速
-                    carPhysics.speed += PHYSICS.BRAKING * deltaTime;
-                    if (carPhysics.speed > 0) carPhysics.speed = 0;
+                } else if (carPhysics.speed >= 0 && carPhysics.speed <= 1) {
+                    // 接近停止 - 平滑过渡到倒车
+                    carPhysics.speed -= PHYSICS.BRAKING * 0.5 * deltaTime;
+                } else {
+                    // 已经停止或后退 - 开始倒车加速
+                    carPhysics.speed -= PHYSICS.REVERSE_ACCEL * deltaTime;
                 }
             }
             
@@ -758,15 +784,23 @@
             // 计算新位置
             const newPosition = carPhysics.position.clone().add(carPhysics.velocity);
             
-            // ----- 赛道边界限制 -----
+            // ----- 赛道边界限制 - 只限制位置，不干涉玩家速度控制 -----
             const boundaryResult = enforceTrackBoundary(newPosition);
+            
+            // 撞墙轻微减速，但允许玩家控制覆盖
+            if (boundaryResult.hitBoundary) {
+                carPhysics.speed *= 0.8; // 只轻微减速20%
+                // 确保速度不会归零到卡死
+                if (controls.forward) {
+                    carPhysics.speed = Math.max(carPhysics.speed, 8);
+                }
+                if (controls.backward) {
+                    carPhysics.speed = Math.min(carPhysics.speed, -5);
+                }
+            }
+            
             carPhysics.position.copy(boundaryResult.position);
             carPhysics.onTrack = boundaryResult.onTrack;
-            
-            // 如果撞墙，速度降低但仍可操控
-            if (boundaryResult.hitBoundary) {
-                carPhysics.speed *= 0.5; // 撞墙减速50%
-            }
             
             // 更新赛车位置和旋转
             car.position.copy(carPhysics.position);
@@ -785,7 +819,7 @@
             checkLapProgress();
         }
         
-        // 赛道边界限制 - 强制小车留在赛道内
+        // 赛道边界限制 - 只限制位置，不干涉速度控制
         function enforceTrackBoundary(position) {
             // 找到赛道上最近的点
             let closestPoint = null;
@@ -818,7 +852,7 @@
                     position.z - closestPoint.z
                 ).normalize();
                 
-                // 将位置限制在边界上
+                // 刚好放在边界线上，留足够空间让赛车移动
                 const clampedPosition = new THREE.Vector3(
                     closestPoint.x + direction.x * boundaryRadius,
                     position.y,
