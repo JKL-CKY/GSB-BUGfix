@@ -215,10 +215,13 @@
         const PHYSICS = {
             MAX_SPEED: 80,           // 最大速度 (KM/H)
             ACCELERATION: 30,        // 加速度
-            BRAKING: 60,             // 刹车力度（加大刹车力度）
+            BRAKING: 60,             // 刹车力度
+            REVERSE_SPEED: 25,       // 倒车最大速度
+            REVERSE_ACCEL: 15,       // 倒车加速度
             FRICTION: 8,             // 地面摩擦力
             OFF_TRACK_FRICTION: 40,  // 赛道外摩擦力
             TURN_SPEED: 2.5,         // 转向速度
+            TURN_SMOOTHING: 2.5,     // 转向平滑系数（越小越平滑）
             DRIFT_FACTOR: 0.3,       // 漂移系数
             CAMERA_DISTANCE: 12,     // 摄像机距离
             CAMERA_HEIGHT: 5,        // 摄像机高度
@@ -608,16 +611,15 @@
         // ==========================================
         
         function setupEventListeners() {
-            // 使用对象跟踪按键状态
             const keysPressed = {};
             
-            // 键盘按下
             window.addEventListener('keydown', (e) => {
-                // 防止重复触发
-                if (keysPressed[e.key]) return;
-                keysPressed[e.key] = true;
+                const key = e.key.toLowerCase();
+                const keyId = key === 'arrowup' || key === 'arrowdown' || key === 'arrowleft' || key === 'arrowright' ? e.key : key;
                 
-                // 防止方向键和WASD滚动页面
+                if (keysPressed[keyId]) return;
+                keysPressed[keyId] = true;
+                
                 if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
                     e.preventDefault();
                 }
@@ -627,8 +629,6 @@
                     document.getElementById('game-title').classList.add('hidden');
                 }
                 
-                // 同时处理多个按键
-                const key = e.key.toLowerCase();
                 if (key === 'w' || e.key === 'ArrowUp') {
                     controls.forward = true;
                 }
@@ -643,11 +643,11 @@
                 }
             }, false);
             
-            // 键盘释放
             window.addEventListener('keyup', (e) => {
-                keysPressed[e.key] = false;
-                
                 const key = e.key.toLowerCase();
+                const keyId = key === 'arrowup' || key === 'arrowdown' || key === 'arrowleft' || key === 'arrowright' ? e.key : key;
+                keysPressed[keyId] = false;
+                
                 if (key === 'w' || e.key === 'ArrowUp') {
                     controls.forward = false;
                 }
@@ -662,14 +662,13 @@
                 }
             }, false);
             
-            // 防止窗口失去焦点时按键卡住
             window.addEventListener('blur', () => {
                 controls.forward = false;
                 controls.backward = false;
                 controls.left = false;
                 controls.right = false;
-                for (let key in keysPressed) {
-                    keysPressed[key] = false;
+                for (let k in keysPressed) {
+                    keysPressed[k] = false;
                 }
             });
         }
@@ -688,7 +687,6 @@
         function updatePhysics(deltaTime) {
             if (!gameState.started) return;
             
-            // 限制 deltaTime 防止卡顿导致的问题
             deltaTime = Math.min(deltaTime, 0.1);
             
             // ----- 转向控制 -----
@@ -696,8 +694,8 @@
             if (controls.left) targetSteering = PHYSICS.TURN_SPEED;
             if (controls.right) targetSteering = -PHYSICS.TURN_SPEED;
             
-            // 平滑转向
-            carPhysics.steering += (targetSteering - carPhysics.steering) * 5 * deltaTime;
+            // 平滑转向（使用更小的系数实现阻尼感）
+            carPhysics.steering += (targetSteering - carPhysics.steering) * PHYSICS.TURN_SMOOTHING * deltaTime;
             
             // 前轮视觉转向
             wheels.forEach(wheel => {
@@ -706,20 +704,18 @@
                 }
             });
             
-            // ----- 速度控制（S键改为刹车，不是倒车）-----
+            // ----- 速度控制（W加速，S刹车/倒车）-----
             if (controls.forward) {
-                // 加速
                 carPhysics.speed += PHYSICS.ACCELERATION * deltaTime;
             } else if (controls.backward) {
-                // 刹车：无论前进还是后退，都向0减速
                 if (carPhysics.speed > 0) {
-                    // 正在前进，刹车减速
                     carPhysics.speed -= PHYSICS.BRAKING * deltaTime;
                     if (carPhysics.speed < 0) carPhysics.speed = 0;
-                } else if (carPhysics.speed < 0) {
-                    // 正在后退，刹车减速
-                    carPhysics.speed += PHYSICS.BRAKING * deltaTime;
-                    if (carPhysics.speed > 0) carPhysics.speed = 0;
+                } else {
+                    carPhysics.speed -= PHYSICS.REVERSE_ACCEL * deltaTime;
+                    if (carPhysics.speed < -PHYSICS.REVERSE_SPEED) {
+                        carPhysics.speed = -PHYSICS.REVERSE_SPEED;
+                    }
                 }
             }
             
@@ -733,12 +729,15 @@
             
             // 限制最大速度
             const maxSpeed = carPhysics.onTrack ? PHYSICS.MAX_SPEED : PHYSICS.MAX_SPEED * 0.3;
-            carPhysics.speed = Math.max(-maxSpeed * 0.5, Math.min(maxSpeed, carPhysics.speed));
+            carPhysics.speed = Math.max(-PHYSICS.REVERSE_SPEED, Math.min(maxSpeed, carPhysics.speed));
             
             // ----- 转向与漂移 -----
-            // 只有在移动时才能转向
-            if (Math.abs(carPhysics.speed) > 1) {
-                const turnAmount = carPhysics.steering * deltaTime * (carPhysics.speed / PHYSICS.MAX_SPEED);
+            // 只有在移动时才能转向，速度越快转向越灵敏（但有上限）
+            if (Math.abs(carPhysics.speed) > 0.5) {
+                // 速度相关的转向灵敏度：低速时转向慢，高速时转向快但有上限
+                const speedFactor = Math.min(1, Math.abs(carPhysics.speed) / (PHYSICS.MAX_SPEED * 0.3));
+                const turnSensitivity = 0.3 + speedFactor * 0.7; // 0.3 到 1.0 之间
+                const turnAmount = carPhysics.steering * deltaTime * turnSensitivity * (carPhysics.speed > 0 ? 1 : -1);
                 carPhysics.heading += turnAmount;
             }
             
@@ -763,9 +762,10 @@
             carPhysics.position.copy(boundaryResult.position);
             carPhysics.onTrack = boundaryResult.onTrack;
             
-            // 如果撞墙，速度降低但仍可操控
+            // 如果撞墙，速度归零并清除速度向量，玩家可以立即倒车脱离
             if (boundaryResult.hitBoundary) {
-                carPhysics.speed *= 0.5; // 撞墙减速50%
+                carPhysics.speed = 0;
+                carPhysics.velocity.set(0, 0, 0);
             }
             
             // 更新赛车位置和旋转
@@ -787,12 +787,10 @@
         
         // 赛道边界限制 - 强制小车留在赛道内
         function enforceTrackBoundary(position) {
-            // 找到赛道上最近的点
             let closestPoint = null;
             let closestT = 0;
             let minDistance = Infinity;
             
-            // 采样多个点来找到最近距离
             for (let i = 0; i < 100; i++) {
                 const t = i / 100;
                 const point = trackCurve.getPointAt(t);
@@ -807,18 +805,38 @@
                 }
             }
             
-            // 赛道边界半径（路肩内侧）
             const boundaryRadius = PHYSICS.TRACK_BOUNDARY - 0.5;
+            
+            // 计算当前位置到赛道中心的方向
+            const currentDir = new THREE.Vector2(
+                carPhysics.position.x - closestPoint.x,
+                carPhysics.position.z - closestPoint.z
+            );
+            const currentDist = currentDir.length();
+            
+            // 计算新位置到赛道中心的方向
+            const newDir = new THREE.Vector2(
+                position.x - closestPoint.x,
+                position.z - closestPoint.z
+            );
+            const newDist = newDir.length();
+            
+            // 如果新位置比当前位置更靠近赛道中心（正在向内移动），允许移动
+            if (newDist < currentDist && currentDist > boundaryRadius * 0.8) {
+                return {
+                    position: position,
+                    onTrack: newDist < boundaryRadius - 1,
+                    hitBoundary: false
+                };
+            }
             
             // 如果超出边界，将位置限制在边界内
             if (minDistance > boundaryRadius) {
-                // 计算从赛道中心到当前位置的方向
                 const direction = new THREE.Vector2(
                     position.x - closestPoint.x,
                     position.z - closestPoint.z
                 ).normalize();
                 
-                // 将位置限制在边界上
                 const clampedPosition = new THREE.Vector3(
                     closestPoint.x + direction.x * boundaryRadius,
                     position.y,
